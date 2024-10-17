@@ -1,0 +1,254 @@
+---
+title: "ISPY Project Data Processing"
+author:
+  - name: Nasim Bondar Sahebi
+    affiliation: Princess Margaret Cancer Center, University Health Network, Toronto, Ontario, Canada
+date: "2024-10-15"
+output:
+  html_document:
+    self_contained: true
+    keep_md: false
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## load libraries
+
+```{r libraries}
+library(MultiAssayExperiment) 
+library(knitr)
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggvenn)
+```
+## Data Loading and Preparation
+
+**Data Overview**:
+
+  - **Study Reference**: [PubMed ID: 35623341](https://pubmed.ncbi.nlm.nih.gov/35623341/)
+  - **Clinical Trial**: [ISPY2/NCT01042379](https://clinicaltrials.gov/study/NCT01042379)
+  - **Data Source**: [GEO Accession: GSE194040](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE194040)
+  - **Organism**: Homo sapiens
+  - **Study Summary**: The dataset contains mRNA and RPPA data for 987 patients from the neoadjuvant I-SPY2 trial, with clinical data including hormone receptor (HR), HER2 status, and pathological complete response (pCR). This dataset profiles gene expression on over ~19,000 genes, with ~800 patients batch-corrected using ComBat.
+  - **Data Types**:
+    - **Genomics Data**: Gene expression profiling by array (mRNA), normalized pre-treatment LCM-RPPA data for key cancer signaling proteins.
+    - **Radiomics Data**: Dynamic contrast-enhanced MRI (DCE-MRI) and other imaging data for tumor volume monitoring.
+  - **Platforms**: Agilent 44K arrays (GPL30493 and GPL20078) for genomics; MRI for radiomics.
+
+**Patient and Treatment Details**:
+
+  - **Total Patient Count (RNA-seq)**: 987
+  - **Total Patient Count (MRI)**: 985 (719 I-SPY2 cases and 266 ACRIN-6698 cases)
+  - **Treatment Groups**:
+    - **IO + Chemo**: 69 
+    - **Chemo + Targeted Therapy**: 687
+    - **Chemo Alone**: 179 
+    - **Targeted Therapy Alone**: 52
+  - **Key Treatment Arms**:
+    - Control (Paclitaxel ± Trastuzumab)
+    - Veliparib + Carboplatin
+    - AMG-386 (Trebananib) ± Trastuzumab
+    - MK-2206 ± Trastuzumab
+    - Neratinib, Ganetespib, Ganitumab, Pembrolizumab, Pertuzumab + Trastuzumab, and T-DM1
+  - **Key Clinical Markers**:
+    - **HR Status**: Positive (1) or Negative (0)
+    - **HER2 Status**: Positive (1) or Negative (0)
+    - **pCR (Pathological Complete Response)**: Yes (1) or No (0)
+    - **MammaPrint Risk**: MP1 (high risk) or MP2 (ultra-high risk)
+
+**Additional Information**:
+
+  - **Batch Correction**: ComBat was applied to address batch effects in the gene expression data, adjusting approximately 800 patients, with linear factors applied to the remaining patients.
+  - **Radiomics Details**: The MRI dataset consists of serial DCE-MRI scans (4 per patient) performed before and during neoadjuvant chemotherapy to monitor tumor volume changes and assess response.
+  - **Data Access**: The raw and processed genomics data, along with batch correction details, are available in the supplementary files of the GEO dataset [GSE194040](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE194040). Imaging data is available from [The Cancer Imaging Archive - ISPY2 Collection](https://www.cancerimagingarchive.net/collection/ispy2/).
+  - **Relevant Publications**:
+    - Wolf DM et al., "Redefining breast cancer subtypes to guide treatment prioritization and maximize response," *Cancer Cell*, 2022, PMID: [35623341](https://pubmed.ncbi.nlm.nih.gov/35623341).
+
+### Load MultiAssayExperiment .rds File, Extract Clinical, Expression, and Annotation Data
+
+In this section, we will load the multi-assay `.rds` file, extract relevant clinical, expression, and annotation data, and prepare the expression data for analysis by normalizing it using quantile normalization. We will also integrate the radiomics data for further analysis.
+
+```{r multiassay extraction}
+
+# Load your multiassay result and extract clinical data , expression data and annotation
+
+#load mae obj
+mae <- readRDS("~/BHK lab/I-SPY-Project/Source Data/ICB_Wolf.rds")
+
+#extract Clinical data 
+clin <- data.frame(colData(mae)) # Dim 987 x 86
+
+# Display only the first 10 rows of the 'clin' dataset
+DT::datatable(clin, options = list(scrollX = TRUE, pageLength = 10), caption = "Genomics clinical data")
+
+# Extract the expression data(Microarray)
+expr <- assays(mae)[["expr"]] # Dim 18348 x 987
+
+#extracting the annotation 
+annot <- data.frame(rowData(mae@ExperimentList$expr))
+
+# Display few rows of the microarray
+DT::datatable(expr[1:8, 1:4])
+
+DT::datatable(annot, options = list(scrollX = TRUE, pageLength = 10), caption = "Annotation of Microarray genes")
+
+```
+
+## Patient Matching the Genomics Data with Radiomics Data
+
+We have metadata from `ISPY2-Imaging-Cohort-1-Clinical-Data.xlsx` extracted from [The Cancer Imaging Archive - ISPY2 Collection](https://www.cancerimagingarchive.net/collection/ispy2/). This clinical data includes 985 cases (719 I-SPY2 cases plus 266 [ACRIN-6698](https://www.cancerimagingarchive.net/collection/ispy1/) cases).
+
+### Summary of Radiomics Data
+The radiomics data from the **I-SPY2 Trial** includes **dynamic contrast-enhanced MRI (DCE-MRI)** scans performed on patients before and during neoadjuvant chemotherapy. This dataset includes MRI exams of 719 patients with **4 scans per patient**, designed to evaluate tumor response to treatment based on functional tumor volume (FTV) and other features. 
+
+
+**Note**: Each MRI scan could involve several segmentations depending on the analysis, such as for functional tumor volume (FTV), longest diameter, and sphericity measurements. A retrospective study within the trial involved a subset of 384 patients where multiple MRI features were segmented and analyzed
+
+The **I-SPY2 Imaging Cohort 1** consists of MRI data for 985 patients, combining data from the I-SPY2 trial and the ACRIN 6698 study. These MRI data were acquired at multiple time points across more than 22 clinical centers.
+
+### Goals:
+- **Metadata MRI**: Identify which patients have MRI data and how many (some may have multiple MRI entries). Load the imaging metadata, intersect with patient IDs from genomics data, and match the patients.
+- **Venn Diagram**: Generate a Venn diagram showing how many patients have clinical, genomics, and imaging data, and the overlap between them.
+
+This analysis will allow us to better understand the overlap between genomics and radiomics data and facilitate integrated analyses.
+
+
+```{r check Patient Matching}
+
+# read the Radiomics clincal data
+Radiomics_clin <- read_excel("~/BHK lab/I-SPY-Project/Source Data/ISPY2-Imaging-Cohort-1-Clinical-Data.xlsx")   # dim 985 x 10
+
+DT::datatable(Radiomics_clin, options = list(scrollX = TRUE, pageLength = 10), caption = "Radiomics clinical dataframe")
+
+# Rename clin to genomic
+Genomics_clin <- clin # dim 987 x 86
+
+# Remove the "X" prefix from patient IDs
+Genomics_clin$patientid <- sub("^X", "", Genomics_clin$patientid)
+rownames(Genomics_clin) <- Genomics_clin$patientid
+colnames(expr) <- sub("^X", "", colnames(expr))
+
+# Intersection of patient IDs between Genomics_clin and Radiomics_clin
+common_patients <- intersect(Genomics_clin$patientid, Radiomics_clin$Patient_ID) #982 common patients
+
+# Print the result in a nice format
+cat("The number of patients with both microarray and MRI data is:", length(common_patients), "\n")
+
+# Print the result in a nice format
+cat("The number of patients with both microarray and MRI data is:", length(common_patients), "\n")
+
+venn_data <- list(
+  Genomics = Genomics_clin$patientid,
+  Radiomics = Radiomics_clin$Patient_ID
+)
+
+# Create Venn diagram
+ggvenn(venn_data, fill_color = c("#A6CEE3", "#FB9A99"), stroke_size = 0.5, set_name_size = 4) +
+  ggtitle("Overlap of Genomics (Microarray) and Radiomics (MRI) Patient IDs") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+    plot.background = element_rect(fill = "white"),
+    panel.background = element_blank()
+  )
+
+```
+## Merging Genomics and Radiomics Data based on Patient IDs
+ 
+ We merge the `Genomics_clin` and `Radiomics_clin` datasets based on common patient IDs, ensuring that radiomics columns are prefixed with "Radiomics_" for tracking purposes. After the merge, the data will be saved as a CSV file for further analysis.
+
+```{r check Merging data}
+
+
+# Add "Radiomics_" prefix to the column names of Radiomics_clin (except patient ID)
+ colnames(Radiomics_clin)[-which(colnames(Radiomics_clin) == "Patient_ID")] <-
+   paste0("Radiomics_", colnames(Radiomics_clin)[-which(colnames(Radiomics_clin) == "Patient_ID")])
+
+# Merge the Genomics and Radiomics data by patient ID
+ merged_clin <- merge(Genomics_clin, Radiomics_clin, by.x = "patientid", by.y = "Patient_ID")
+
+# Order the merged data by patient ID
+merged_clin <- merged_clin[order(merged_clin$patientid), ]
+
+DT::datatable(merged_clin, options = list(scrollX = TRUE, pageLength = 10), caption = "Merged clinical data: including Genomics and Radiomics clin data by patient ID")
+
+# Save the merged dataframe as a CSV file
+#write.csv(merged_clin, "~/BHK lab/I-SPY-Project/output Data/Merged_clin_GenomicandRadoiomic.csv", row.names = FALSE)
+
+```
+
+## Verifying Segmentation Consistency Across Patients
+
+We aim to ensure that each patient has the expected segmentation images, specifically 4 segmentation masks related to their Dynamic Contrast Enhanced (DCE) MRI scans. This information is crucial for the Functional Tumor Volume (FTV) analysis, part of the I-SPY clinical trials.
+
+### Segmentation Information Extracted from FTV Processing
+
+The segmentation process includes four or five distinct masking steps applied during the DCE MRI acquisition. These steps include:
+
+1. **Manual VOI (Volume of Interest)**: A rectangular volume of interest drawn around the enhancing tumor region.
+2. **Background Masking**: Eliminating noise and saturated fat regions using an intensity threshold.
+3. **Percent Enhancement (PE) Threshold**: Masking non-enhancing tissue using a percentage threshold on the early PE map.
+4. **Connectivity Filter**: A 3D filter to ensure each voxel has the required number of neighboring voxels.
+5. **OMIT Regions**: Manual regions drawn to exclude non-tumor areas not eliminated by other masking steps.
+
+The DICOM masks are stored as **2D derived images** that align with the original DCE MRI acquisitions. These masks are available for download through the UCSF Box site [here](https://ucsf.box.com/s/d09xetaatzgnz2p9bxlqh50rrzilgcoj), and they represent different time points (T1, T2, T3, and T4) during treatment.
+
+### Series Information from `ispy1_dce_series_info.xlsx`
+
+The file `ispy1_dce_series_info.xlsx` (sheet: `DCE Series, All 20160823`) lists all original DCE series in the I-SPY 1 collection and provides detailed metadata for each patient's DCE MRI series, including:
+
+- **PATIENT_ID**: The unique patient identifier.
+- **TIME_POINT**: Time points during the study (T1, T2, T3, T4).
+- **SERIES_DESC**: Description of the MRI series.
+- **SERIES_ID**: A unique identifier for each MRI series.
+- **VOLSER**: Indicates whether volume SER (Signal Enhancement Ratio) calculation was possible.
+- **OMIT_ROI_COUNT**: The number of regions excluded (OMIT regions).
+
+By analyzing this data, we can validate that each patient has 4 segmentation masks, corresponding to the four time points.
+
+**results**: 221 patienst have segmanations ,Each patient from  is expected to have at least 4 segmentation masks across the four study time points (T1-T4). After reviewing the series information in the provided DICOM metadata and segmentation mask files, all patients, except for 24, have at least 4 segmentation file. 
+
+```{r segmentation check data}
+
+# read ispy1_dce_series_info.xlsx` (sheet: `DCE Series, All 20160823`)
+ispy1_dce_series_info <- read_excel("~/BHK Lab/I-SPY-Project/Source Data/ispy1_dce_series_info.xlsx", sheet = "DCE Series, All 20160823") #dim 1473 x 37
+
+# display DCE Series info
+DT::datatable(ispy1_dce_series_info, options = list(scrollX = TRUE, pageLength = 10), caption = "Lists all original DCE series in the I-SPY 1 collection info per patient's DCE MRI series")
+
+# Count the number of series per patient for each time point and calculate the total number of segmentation
+series_per_patient <- ispy1_dce_series_info %>%
+  group_by(PATIENT_ID, TIME_POINT) %>%
+  summarize(Series_Count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = TIME_POINT, values_from = Series_Count, values_fill = 0) %>%
+  mutate(across(starts_with("T"), as.numeric),  # Ensure all time point columns are numeric
+         Total_Segmentations = rowSums(select(., starts_with("T")), na.rm = TRUE))
+
+# display DCE Series info
+DT::datatable(ispy1_dce_series_info , options = list(scrollX = TRUE, pageLength = 10), caption = "Table: Number of Series per Patient at Each Time Point amd total numbers of segmentation")
+
+# Filter for patients with less than 4 segmentation
+patients_less_than_4 <- series_per_patient %>%
+  filter(Total_Segmentations < 4) %>%
+  select(PATIENT_ID, Total_Segmentations)
+
+DT::datatable(patients_less_than_4, options = list(scrollX = TRUE, pageLength = 10), caption = "Table: Patients with Less Than 4 Values")
+
+
+# # read ispy1_dce_series_info.xlsx` (sheet: "All Series, All exams 20160720")
+# ispy1_all_series_info <- read_excel("~/BHK Lab/I-SPY-Project/Source Data/ispy1_all_series_info.xlsx", sheet = "All Series, All exams 20160720") #dim 7854 x 11
+
+# ispy1_segmentaions_info <- ispy1_all_series_info[ispy1_all_series_info$SERIES_CAT %in% "segmentation",] # dim 1416 X 11
+#
+# ispy1_segmentaions_per_patient <- ispy1_segmentaions_info %>%
+#   group_by(PATIENT_ID, TIME_POINT) %>%
+#   summarize(Series_Count = n(), .groups = 'drop') %>%
+#   pivot_wider(names_from = TIME_POINT, values_from = Series_Count, values_fill = 0) %>%
+#   mutate(across(starts_with("T"), as.numeric),  # Ensure all time point columns are numeric
+#          Total_Segmentations = rowSums(select(., starts_with("T")), na.rm = TRUE))
+```
+
